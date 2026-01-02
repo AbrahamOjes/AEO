@@ -35,6 +35,8 @@ import {
 } from 'lucide-react';
 import { AIModel, AEOReport, QueryResult, MentionPosition, Sentiment, CompetitorIntel, AEOPlaybook } from './types';
 import { fetchAIResponse, analyzeResponse, getCompetitorMarketIntel, generateOptimizationPlaybook } from './services/geminiService';
+import { saveReport, getReports, getReportById, deleteReport, isSupabaseConfigured, setSupabaseConfig } from './services/supabaseService';
+import { exportToCSV, exportToPDF } from './services/exportService';
 import { POSITION_POINTS, SENTIMENT_MODIFIER, MAX_POINTS_PER_CHECK } from './constants';
 
 // Declare external AI Studio functions
@@ -50,7 +52,7 @@ declare global {
 
 // --- Utility Components ---
 
-const Navbar = () => (
+const Navbar: React.FC<{ onHistoryClick?: () => void }> = ({ onHistoryClick }) => (
   <nav className="bg-white border-b border-gray-100 py-4 px-6 flex items-center justify-between sticky top-0 z-50">
     <div className="flex items-center gap-2">
       <div className="bg-indigo-600 p-1.5 rounded-lg">
@@ -61,6 +63,12 @@ const Navbar = () => (
     <div className="hidden md:flex items-center gap-8 text-sm font-medium text-gray-600">
       <a href="#" className="hover:text-indigo-600 transition">How it works</a>
       <a href="#" className="hover:text-indigo-600 transition">Pricing</a>
+      {onHistoryClick && (
+        <button onClick={onHistoryClick} className="flex items-center gap-2 hover:text-indigo-600 transition">
+          <BarChart className="w-4 h-4" />
+          History
+        </button>
+      )}
       <a href="https://github.com/AbrahamOjes/AEO.git" target="_blank" rel="noreferrer" className="flex items-center gap-2 hover:text-indigo-600 transition">
         <Github className="w-4 h-4" />
         GitHub
@@ -104,25 +112,28 @@ const Footer = () => (
 // --- View Components ---
 
 const LandingView: React.FC<{ 
-  onStart: (brand: string, url: string, queries: string[], deepThinking: boolean) => void 
+  onStart: (brand: string, url: string, queries: string[], competitors: string[], deepThinking: boolean) => void 
 }> = ({ onStart }) => {
   const [brand, setBrand] = useState('');
   const [url, setUrl] = useState('');
   const [queriesStr, setQueriesStr] = useState('');
+  const [competitorsStr, setCompetitorsStr] = useState('');
   const [deepThinking, setDeepThinking] = useState(true);
 
   const handleRun = async () => {
     if (!brand || !queriesStr) return;
     
-    // Pro features require API key selection
-    const hasKey = await window.aistudio.hasSelectedApiKey();
-    if (!hasKey) {
-      await window.aistudio.openSelectKey();
-      // Proceed immediately as per race condition guidelines
+    // Pro features require API key selection (only in AI Studio environment)
+    if (window.aistudio) {
+      const hasKey = await window.aistudio.hasSelectedApiKey();
+      if (!hasKey) {
+        await window.aistudio.openSelectKey();
+      }
     }
-
+    
     const queries = queriesStr.split('\n').filter(q => q.trim().length > 0).slice(0, 10);
-    onStart(brand, url, queries, deepThinking);
+    const competitors = competitorsStr.split(',').map(c => c.trim()).filter(c => c.length > 0).slice(0, 3);
+    onStart(brand, url, queries, competitors, deepThinking);
   };
 
   return (
@@ -180,6 +191,20 @@ const LandingView: React.FC<{
             />
           </div>
 
+          <div>
+            <label className="block text-sm font-semibold text-gray-700 mb-2">Competitors to Track (Optional, comma-separated, max 3)</label>
+            <div className="relative">
+              <Users className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+              <input 
+                type="text" 
+                placeholder="e.g. Competitor A, Competitor B, Competitor C"
+                value={competitorsStr}
+                onChange={(e) => setCompetitorsStr(e.target.value)}
+                className="w-full pl-12 pr-5 py-4 rounded-xl border border-gray-200 focus:ring-4 focus:ring-indigo-50 focus:border-indigo-500 outline-none transition text-lg"
+              />
+            </div>
+          </div>
+
           <div className="flex flex-col md:flex-row items-center justify-between gap-6 p-6 bg-indigo-50 rounded-2xl border border-indigo-100">
             <div className="flex items-center gap-4">
               <div className="bg-indigo-600 p-2.5 rounded-xl">
@@ -212,8 +237,8 @@ const LandingView: React.FC<{
           </button>
           
           <div className="flex items-center justify-center gap-2 text-[10px] text-gray-400 font-bold uppercase tracking-widest">
-            <Key className="w-3 h-3" />
-            Requires Paid API Key for Deep Thinking
+            <Cpu className="w-3 h-3" />
+            Powered by Gemini & OpenRouter
           </div>
         </div>
       </div>
@@ -225,9 +250,10 @@ const ProcessingView: React.FC<{
   brand: string; 
   brandUrl: string;
   queries: string[];
+  trackedCompetitors: string[];
   deepThinking: boolean;
   onComplete: (report: AEOReport) => void;
-}> = ({ brand, brandUrl, queries, deepThinking, onComplete }) => {
+}> = ({ brand, brandUrl, queries, trackedCompetitors, deepThinking, onComplete }) => {
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState('Initializing agents...');
 
@@ -238,7 +264,7 @@ const ProcessingView: React.FC<{
       const results: QueryResult[] = [];
       const models = [AIModel.ChatGPT, AIModel.Perplexity, AIModel.Gemini];
       let completed = 0;
-      const competitorSet = new Set<string>();
+      const competitorSet = new Set<string>(trackedCompetitors);
 
       // Step 1: AI Responses
       for (const query of queries) {
@@ -246,8 +272,11 @@ const ProcessingView: React.FC<{
           setStatus(`${deepThinking ? 'Deep' : 'Analyzing'} ${model} answer for "${query.length > 30 ? query.substring(0, 30) + '...' : query}"`);
           
           try {
+            console.log(`[AEO] Fetching ${model} response for: ${query}`);
             const raw = await fetchAIResponse(model, query, deepThinking);
+            console.log(`[AEO] Got response from ${model}:`, raw.substring(0, 100) + '...');
             const analysis = await analyzeResponse(brand, raw);
+            console.log(`[AEO] Analysis result:`, analysis);
             
             results.push({
               id: Math.random().toString(36).substr(2, 9),
@@ -258,11 +287,7 @@ const ProcessingView: React.FC<{
 
             analysis.competitors_mentioned.forEach(c => competitorSet.add(c));
           } catch (err: any) {
-            console.error(err);
-            // Re-prompt for key if entity not found (usually means key issue)
-            if (err.message?.includes("Requested entity was not found")) {
-              await window.aistudio.openSelectKey();
-            }
+            console.error('[AEO] Error:', err);
             results.push({
               id: Math.random().toString(36).substr(2, 9),
               query_text: query,
@@ -283,7 +308,10 @@ const ProcessingView: React.FC<{
 
       // Step 2: Competitive Intel
       setStatus('Deep reasoning on competitor landscape...');
-      const topCompetitors = Array.from(competitorSet).slice(0, 3);
+      // Prioritize user-specified competitors, then add discovered ones
+      const userCompetitors = trackedCompetitors.slice(0, 3);
+      const discoveredCompetitors = Array.from(competitorSet).filter(c => !userCompetitors.includes(c));
+      const topCompetitors = [...userCompetitors, ...discoveredCompetitors].slice(0, 3);
       const competitorIntel: CompetitorIntel[] = [];
 
       for (const comp of topCompetitors) {
@@ -627,9 +655,19 @@ const ResultsView: React.FC<{
           )}
         </div>
         <div className="flex gap-4">
-          <button className="flex items-center gap-2 px-6 py-3 border border-gray-200 rounded-xl hover:bg-gray-50 transition font-medium">
+          <button 
+            onClick={() => exportToCSV(report)}
+            className="flex items-center gap-2 px-6 py-3 border border-gray-200 rounded-xl hover:bg-gray-50 transition font-medium"
+          >
             <Download className="w-4 h-4" />
-            Full CSV
+            CSV
+          </button>
+          <button 
+            onClick={() => exportToPDF(report)}
+            className="flex items-center gap-2 px-6 py-3 border border-gray-200 rounded-xl hover:bg-gray-50 transition font-medium"
+          >
+            <FileText className="w-4 h-4" />
+            PDF
           </button>
           <button onClick={onReset} className="px-6 py-3 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition font-bold shadow-lg shadow-indigo-100 flex items-center gap-2">
             <RefreshCw className="w-4 h-4" />
@@ -647,7 +685,7 @@ const ResultsView: React.FC<{
         </div>
         
         <div className="lg:col-span-3 grid grid-cols-1 md:grid-cols-3 gap-6">
-          {Object.entries(report.model_scores).map(([model, score]) => (
+          {(Object.entries(report.model_scores) as [string, number][]).map(([model, score]) => (
             <div key={model} className="bg-white p-8 rounded-3xl border border-gray-100 shadow-sm group">
               <span className="text-sm font-bold text-gray-400 uppercase tracking-widest mb-4 block group-hover:text-indigo-600 transition-colors">{model}</span>
               <div className={`text-4xl font-bold mb-4 ${getScoreColor(score)}`}>{score}%</div>
@@ -776,20 +814,170 @@ const ResultsView: React.FC<{
 
 // --- Main App Controller ---
 
+// History View Component
+const HistoryView: React.FC<{
+  onSelectReport: (report: AEOReport) => void;
+  onBack: () => void;
+}> = ({ onSelectReport, onBack }) => {
+  const [reports, setReports] = useState<AEOReport[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    const loadReports = async () => {
+      try {
+        const data = await getReports();
+        setReports(data);
+      } catch (err: any) {
+        setError(err.message || 'Failed to load reports');
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadReports();
+  }, []);
+
+  const handleDelete = async (reportId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!confirm('Delete this report?')) return;
+    try {
+      await deleteReport(reportId);
+      setReports(reports.filter(r => r.id !== reportId));
+    } catch (err: any) {
+      alert('Failed to delete: ' + err.message);
+    }
+  };
+
+  const handleSelect = async (reportId: string) => {
+    try {
+      const fullReport = await getReportById(reportId);
+      if (fullReport) onSelectReport(fullReport);
+    } catch (err: any) {
+      alert('Failed to load report: ' + err.message);
+    }
+  };
+
+  const getScoreColor = (score: number) => {
+    if (score >= 60) return 'text-emerald-600';
+    if (score >= 30) return 'text-amber-500';
+    return 'text-rose-600';
+  };
+
+  return (
+    <div className="max-w-4xl mx-auto py-12 px-6">
+      <div className="flex items-center justify-between mb-8">
+        <div>
+          <button onClick={onBack} className="flex items-center gap-2 text-gray-500 hover:text-indigo-600 mb-4">
+            <ChevronRight className="w-4 h-4 rotate-180" />
+            Back to Home
+          </button>
+          <h1 className="text-3xl font-extrabold text-gray-900">Report History</h1>
+          <p className="text-gray-500 mt-2">View and manage your saved AEO reports</p>
+        </div>
+      </div>
+
+      {!isSupabaseConfigured() && (
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-6 mb-8">
+          <div className="flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-amber-600 mt-0.5" />
+            <div>
+              <h4 className="font-semibold text-amber-800">Database Not Configured</h4>
+              <p className="text-amber-700 text-sm mt-1">
+                Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY environment variables to enable report persistence.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="flex items-center justify-center py-20">
+          <Loader2 className="w-8 h-8 text-indigo-600 animate-spin" />
+        </div>
+      ) : error ? (
+        <div className="text-center py-20">
+          <AlertCircle className="w-12 h-12 text-rose-400 mx-auto mb-4" />
+          <p className="text-gray-500">{error}</p>
+        </div>
+      ) : reports.length === 0 ? (
+        <div className="text-center py-20 bg-gray-50 rounded-3xl border border-dashed border-gray-200">
+          <BarChart className="w-12 h-12 text-gray-300 mx-auto mb-4" />
+          <p className="text-gray-400">No saved reports yet</p>
+          <button onClick={onBack} className="mt-4 text-indigo-600 font-semibold hover:underline">
+            Run your first analysis
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {reports.map(report => (
+            <div 
+              key={report.id}
+              onClick={() => handleSelect(report.id)}
+              className="bg-white rounded-2xl border border-gray-100 p-6 hover:border-indigo-200 hover:shadow-md transition-all cursor-pointer group"
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <div className={`text-3xl font-black ${getScoreColor(report.overall_score)}`}>
+                    {report.overall_score}%
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-gray-900 group-hover:text-indigo-600 transition-colors">
+                      {report.brand_name}
+                    </h3>
+                    <p className="text-sm text-gray-400">
+                      {new Date(report.created_at).toLocaleDateString()} at {new Date(report.created_at).toLocaleTimeString()}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <button 
+                    onClick={(e) => handleDelete(report.id, e)}
+                    className="p-2 text-gray-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
+                  >
+                    <AlertCircle className="w-4 h-4" />
+                  </button>
+                  <ChevronRight className="w-5 h-5 text-gray-300 group-hover:text-indigo-600 transition-colors" />
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const App: React.FC = () => {
-  const [view, setView] = useState<'landing' | 'processing' | 'results'>('landing');
+  const [view, setView] = useState<'landing' | 'processing' | 'results' | 'history'>('landing');
   const [activeBrand, setActiveBrand] = useState('');
   const [activeBrandUrl, setActiveBrandUrl] = useState('');
   const [activeQueries, setActiveQueries] = useState<string[]>([]);
+  const [activeCompetitors, setActiveCompetitors] = useState<string[]>([]);
   const [deepThinking, setDeepThinking] = useState(true);
   const [finalReport, setFinalReport] = useState<AEOReport | null>(null);
 
-  const startAnalysis = (brand: string, url: string, queries: string[], thinking: boolean) => {
+  const startAnalysis = (brand: string, url: string, queries: string[], competitors: string[], thinking: boolean) => {
     setActiveBrand(brand);
     setActiveBrandUrl(url);
     setActiveQueries(queries);
+    setActiveCompetitors(competitors);
     setDeepThinking(thinking);
     setView('processing');
+  };
+
+  const handleReportComplete = async (report: AEOReport) => {
+    setFinalReport(report);
+    setView('results');
+    
+    // Auto-save to database if configured
+    if (isSupabaseConfigured()) {
+      try {
+        await saveReport(report);
+        console.log('Report saved to database');
+      } catch (err) {
+        console.error('Failed to save report:', err);
+      }
+    }
   };
 
   const updateIntel = (oldName: string, newIntel: CompetitorIntel) => {
@@ -802,16 +990,17 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen flex flex-col selection:bg-indigo-100 selection:text-indigo-900">
-      <Navbar />
+      <Navbar onHistoryClick={() => setView('history')} />
       <main className="flex-grow bg-gray-50/50">
         {view === 'landing' && <LandingView onStart={startAnalysis} />}
         {view === 'processing' && (
           <ProcessingView 
             brand={activeBrand} 
             brandUrl={activeBrandUrl}
-            queries={activeQueries} 
+            queries={activeQueries}
+            trackedCompetitors={activeCompetitors}
             deepThinking={deepThinking}
-            onComplete={(report) => { setFinalReport(report); setView('results'); }} 
+            onComplete={handleReportComplete} 
           />
         )}
         {view === 'results' && finalReport && (
@@ -819,6 +1008,12 @@ const App: React.FC = () => {
             report={finalReport} 
             onReset={() => { setView('landing'); setFinalReport(null); }} 
             onUpdateIntel={updateIntel} 
+          />
+        )}
+        {view === 'history' && (
+          <HistoryView 
+            onSelectReport={(report) => { setFinalReport(report); setView('results'); }}
+            onBack={() => setView('landing')}
           />
         )}
       </main>
