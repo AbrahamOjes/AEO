@@ -1,0 +1,5 @@
+{
+  "name": "AI Answer Visibility Checker",
+  "description": "A lightweight AEO (Answer Engine Optimization) tool that tracks how often and how well your brand appears in AI-generated responses across multiple models.",
+  "requestFramePermissions": []
+}
