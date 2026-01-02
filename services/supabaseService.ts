@@ -1,4 +1,4 @@
-import { AEOReport, QueryResult, CompetitorIntel, AEOPlaybook } from '../types';
+import { AEOReport, QueryResult, CompetitorIntel, AEOPlaybook, BrandHistory, ScoreSnapshot, AIModel } from '../types';
 
 // Supabase configuration - set these via environment variables
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
@@ -253,6 +253,7 @@ CREATE TABLE IF NOT EXISTS competitor_intel (
 
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_reports_created_at ON reports(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_reports_brand_name ON reports(brand_name);
 CREATE INDEX IF NOT EXISTS idx_query_results_report_id ON query_results(report_id);
 CREATE INDEX IF NOT EXISTS idx_competitor_intel_report_id ON competitor_intel(report_id);
 
@@ -261,3 +262,77 @@ CREATE INDEX IF NOT EXISTS idx_competitor_intel_report_id ON competitor_intel(re
 -- ALTER TABLE query_results ENABLE ROW LEVEL SECURITY;
 -- ALTER TABLE competitor_intel ENABLE ROW LEVEL SECURITY;
 `;
+
+// Get brand history with score trends
+export const getBrandHistory = async (brandName: string): Promise<BrandHistory | null> => {
+  const reports: DBReport[] = await supabaseFetch(
+    `reports?brand_name=eq.${encodeURIComponent(brandName)}&order=created_at.asc&limit=100`
+  );
+  
+  if (reports.length === 0) return null;
+  
+  const snapshots: ScoreSnapshot[] = reports.map(r => ({
+    date: new Date(r.created_at).getTime(),
+    overall_score: r.overall_score,
+    model_scores: r.model_scores as Record<AIModel, number>,
+    query_count: 0, // Will be populated if needed
+  }));
+  
+  return {
+    brand_name: brandName,
+    snapshots,
+    first_seen: snapshots[0].date,
+    last_updated: snapshots[snapshots.length - 1].date,
+  };
+};
+
+// Get all unique brands with their latest scores
+export const getAllBrands = async (): Promise<{ name: string; latest_score: number; report_count: number; last_updated: number }[]> => {
+  const reports: DBReport[] = await supabaseFetch('reports?order=created_at.desc');
+  
+  const brandMap = new Map<string, { latest_score: number; report_count: number; last_updated: number }>();
+  
+  reports.forEach(r => {
+    const existing = brandMap.get(r.brand_name);
+    if (!existing) {
+      brandMap.set(r.brand_name, {
+        latest_score: r.overall_score,
+        report_count: 1,
+        last_updated: new Date(r.created_at).getTime(),
+      });
+    } else {
+      existing.report_count++;
+    }
+  });
+  
+  return Array.from(brandMap.entries()).map(([name, data]) => ({
+    name,
+    ...data,
+  }));
+};
+
+// Get reports for a specific brand
+export const getReportsByBrand = async (brandName: string): Promise<AEOReport[]> => {
+  const reports: DBReport[] = await supabaseFetch(
+    `reports?brand_name=eq.${encodeURIComponent(brandName)}&order=created_at.desc&limit=50`
+  );
+  
+  return reports.map(r => ({
+    id: r.id,
+    brand_name: r.brand_name,
+    brand_url: r.brand_url || undefined,
+    created_at: new Date(r.created_at).getTime(),
+    overall_score: r.overall_score,
+    model_scores: r.model_scores as Record<AIModel, number>,
+    results: [],
+    competitor_intel: [],
+    playbook: r.playbook || undefined,
+  }));
+};
+
+// Calculate score change between two reports
+export const calculateScoreChange = (current: number, previous: number): { change: number; trend: 'up' | 'down' | 'stable' } => {
+  const change = current - previous;
+  const trend = change > 2 ? 'up' : change < -2 ? 'down' : 'stable';
+  return { change, trend };
+};

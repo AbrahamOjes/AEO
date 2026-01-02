@@ -79,6 +79,85 @@ export const fetchOpenRouterResponse = async (
   return result;
 };
 
+// Smart brand analysis and query generation
+export interface BrandAnalysis {
+  industry: string;
+  category: string;
+  description: string;
+  competitors: string[];
+  queries: string[];
+}
+
+export const analyzeBrandAndGenerateQueries = async (
+  brandName: string,
+  brandUrl?: string
+): Promise<BrandAnalysis> => {
+  const systemPrompt = `You are a brand research expert and AEO (Answer Engine Optimization) strategist. Analyze brands and generate strategic queries to test their visibility in AI assistants. Always respond with valid JSON only.`;
+  
+  const userPrompt = `Analyze the brand "${brandName}"${brandUrl ? ` (website: ${brandUrl})` : ''} and generate strategic queries for AEO analysis.
+
+Based on your knowledge of this brand, provide:
+1. The industry they operate in
+2. Their specific product/service category
+3. A brief description of what they do
+4. Their top 3-5 competitors
+5. 15 strategic queries that would test this brand's visibility in AI assistants
+
+The queries should cover:
+- Direct brand queries ("Is [brand] good?", "What is [brand]?")
+- Comparison queries ("[brand] vs [competitor]")
+- Category queries ("Best [category] brands", "Top [category] companies")
+- Use case queries ("Best [product] for [use case]")
+- Reputation queries ("[brand] reviews", "Is [brand] legit?")
+- Feature queries ("Does [brand] have [feature]?")
+- Price/value queries ("[brand] pricing", "Is [brand] worth it?")
+
+Return JSON with this exact structure:
+{
+  "industry": "string (e.g., 'E-commerce / Retail', 'SaaS / Software')",
+  "category": "string (e.g., 'Fast Fashion', 'CRM Software')",
+  "description": "string (1-2 sentence description of the brand)",
+  "competitors": ["competitor1", "competitor2", "competitor3"],
+  "queries": ["query1", "query2", ... up to 15 queries]
+}`;
+
+  try {
+    console.log('[OpenRouter] Analyzing brand:', brandName);
+    const result = await callOpenRouter(ANALYSIS_MODEL, systemPrompt, userPrompt, true);
+    console.log('[OpenRouter] Brand analysis result:', result);
+    const data = JSON.parse(result);
+    
+    return {
+      industry: data.industry || 'Custom',
+      category: data.category || brandName,
+      description: data.description || '',
+      competitors: data.competitors || [],
+      queries: data.queries || [],
+    };
+  } catch (err) {
+    console.error('[OpenRouter] Error analyzing brand:', err);
+    // Fallback to generic queries
+    return {
+      industry: 'Custom',
+      category: brandName,
+      description: '',
+      competitors: [],
+      queries: [
+        `What is ${brandName}?`,
+        `Is ${brandName} good?`,
+        `${brandName} reviews`,
+        `Is ${brandName} legit?`,
+        `${brandName} alternatives`,
+        `Best alternatives to ${brandName}`,
+        `${brandName} vs competitors`,
+        `Is ${brandName} worth it?`,
+        `${brandName} pricing`,
+        `${brandName} pros and cons`,
+      ],
+    };
+  }
+};
+
 // Analyze AI response for brand mentions
 export const analyzeResponseViaOpenRouter = async (
   brandName: string,
